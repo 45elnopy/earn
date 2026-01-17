@@ -1,92 +1,125 @@
-<?php require 'header.php'; 
+<?php
+require 'includes/config.php';
+require 'includes/functions.php';
 
-// Add Task
-if (isset($_POST['add_task'])) {
-    $title = clean_input($_POST['title']);
-    $desc = clean_input($_POST['description']);
-    $url = clean_input($_POST['url']);
-    $reward = clean_input($_POST['reward']);
-    $type = clean_input($_POST['type']);
+if (!is_logged_in()) {
+    redirect('index.php');
+}
+
+$user_id = $_SESSION['user_id'];
+$user = get_user_data($pdo, $user_id);
+$page_title = "Tasks";
+$current_page = "tasks";
+
+$msg = '';
+$msg_type = '';
+
+// Handle Task Completion
+if (isset($_POST['complete_task'])) {
+    $task_id = $_POST['task_id'];
     
-    $stmt = $pdo->prepare("INSERT INTO tasks (title, description, url, reward, type) VALUES (?, ?, ?, ?, ?)");
-    $stmt->execute([$title, $desc, $url, $reward, $type]);
-    $msg = "Task added successfully";
+    // Check if task exists and is active
+    $stmt = $pdo->prepare("SELECT * FROM tasks WHERE id = ? AND is_active = 1");
+    $stmt->execute([$task_id]);
+    $task = $stmt->fetch();
+
+    if ($task) {
+        // Check if already completed
+        $check = $pdo->prepare("SELECT id FROM user_tasks WHERE user_id = ? AND task_id = ?");
+        $check->execute([$user_id, $task_id]);
+        
+        if ($check->rowCount() == 0) {
+            // Mark as complete
+            $pdo->beginTransaction();
+            try {
+                $insert = $pdo->prepare("INSERT INTO user_tasks (user_id, task_id) VALUES (?, ?)");
+                $insert->execute([$user_id, $task_id]);
+                
+                $update = $pdo->prepare("UPDATE users SET balance = balance + ? WHERE id = ?");
+                $update->execute([$task['reward'], $user_id]);
+                
+                $pdo->commit();
+                $msg = "Task completed! You earned {$task['reward']} Pts.";
+                $msg_type = "success";
+                
+                // Refresh user data
+                $user = get_user_data($pdo, $user_id);
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                $msg = "Error completing task.";
+                $msg_type = "danger";
+            }
+        } else {
+            $msg = "You have already completed this task.";
+            $msg_type = "danger";
+        }
+    }
 }
 
-// Delete Task
-if (isset($_GET['delete'])) {
-    $id = clean_input($_GET['delete']);
-    $pdo->prepare("DELETE FROM tasks WHERE id = ?")->execute([$id]);
-    redirect('tasks.php');
-}
+// Fetch all available tasks
+$stmt = $pdo->prepare("
+    SELECT t.*, 
+    (SELECT count(*) FROM user_tasks ut WHERE ut.task_id = t.id AND ut.user_id = ?) as is_completed 
+    FROM tasks t 
+    WHERE t.is_active = 1
+    ORDER BY t.created_at DESC
+");
+$stmt->execute([$user_id]);
+$tasks = $stmt->fetchAll();
 
-$tasks = $pdo->query("SELECT * FROM tasks ORDER BY id DESC")->fetchAll();
+require 'includes/header.php';
 ?>
 
-<div class="dashboard-container" style="display: block; padding: 0;">
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2rem;">
-        
-        <!-- Add Task Form -->
-        <div class="auth-card" style="margin: 0; max-width: 100%;">
-            <h3>Add New Task</h3>
-            <?php if(isset($msg)) echo "<p style='color: green'>$msg</p>"; ?>
-            <form method="POST">
-                <div class="form-group">
-                    <label>Title</label>
-                    <input type="text" name="title" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>Description</label>
-                    <input type="text" name="description" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>URL</label>
-                    <input type="text" name="url" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>Reward (Pts)</label>
-                    <input type="number" name="reward" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>Type</label>
-                    <select name="type" class="form-control">
-                        <option value="telegram">Telegram</option>
-                        <option value="youtube">YouTube</option>
-                        <option value="link">Link Visit</option>
-                        <option value="other">Other</option>
-                    </select>
-                </div>
-                <button type="submit" name="add_task" class="btn-primary">Add Task</button>
-            </form>
-        </div>
+<div class="container">
+    <?php if($msg): ?>
+        <div class="alert alert-<?php echo $msg_type; ?>"><?php echo $msg; ?></div>
+    <?php endif; ?>
 
-        <!-- Task List -->
-        <div class="auth-card" style="margin: 0; max-width: 100%;">
-            <h3>Running Tasks</h3>
-            <div style="overflow-x: auto; margin-top: 20px;">
-                <table style="width: 100%; border-collapse: collapse; color: var(--text-color);">
-                    <thead>
-                        <tr style="text-align: left; border-bottom: 1px solid var(--border-color);">
-                            <th style="padding: 10px;">ID</th>
-                            <th style="padding: 10px;">Title</th>
-                            <th style="padding: 10px;">Reward</th>
-                            <th style="padding: 10px;">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach($tasks as $t): ?>
-                            <tr style="border-bottom: 1px solid #2F3336;">
-                                <td style="padding: 10px;">#<?php echo $t['id']; ?></td>
-                                <td style="padding: 10px;"><?php echo htmlspecialchars($t['title']); ?></td>
-                                <td style="padding: 10px;"><?php echo number_format($t['reward']); ?></td>
-                                <td style="padding: 10px;">
-                                    <a href="?delete=<?php echo $t['id']; ?>" onclick="return confirm('Delete task?')" style="color: var(--danger-color);"><i class="fas fa-trash"></i></a>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+    <div class="tasks-grid">
+        <?php if(count($tasks) > 0): ?>
+            <?php foreach($tasks as $task): ?>
+                <div class="task-card" style="<?php echo $task['is_completed'] ? 'opacity: 0.7;' : ''; ?>">
+                    <div class="task-header">
+                        <div class="task-icon">
+                            <?php 
+                                $icon = 'fa-tasks';
+                                if($task['type'] == 'telegram') $icon = 'fa-telegram';
+                                elseif($task['type'] == 'youtube') $icon = 'fa-youtube';
+                                elseif($task['type'] == 'link') $icon = 'fa-link';
+                            ?>
+                            <i class="fab <?php echo $icon; ?>"></i>
+                        </div>
+                        <div class="task-reward">+<?php echo number_format($task['reward'], 0); ?> Pts</div>
+                    </div>
+                    <div>
+                        <div class="task-title"><?php echo htmlspecialchars($task['title']); ?></div>
+                        <div class="task-desc"><?php echo htmlspecialchars($task['description']); ?></div>
+                    </div>
+                    
+                    <?php if($task['is_completed']): ?>
+                        <button class="btn-task" disabled style="background: #2ECC71; color: white; cursor: default;">
+                            <i class="fas fa-check"></i> Completed
+                        </button>
+                    <?php else: ?>
+                        <form method="POST" target="_blank" action="<?php echo $task['url']; ?>" onsubmit="setTimeout(() => { document.getElementById('form-<?php echo $task['id']; ?>').submit(); }, 2000);">
+                             <!-- This is a trick: clicking opens URL, and we autosubmit the completion form after 2s delay. 
+                                  In real production, use AJAX and verify via API if possible. -->
+                             <button type="submit" class="btn-task">Open Task</button>
+                        </form>
+                        
+                        <!-- Actual completion trigger form (hidden for user, triggered by logic or separate button for simplicity here) -->
+                        <form method="POST" id="form-<?php echo $task['id']; ?>" style="margin-top: 10px;">
+                            <input type="hidden" name="task_id" value="<?php echo $task['id']; ?>">
+                            <input type="hidden" name="complete_task" value="1">
+                            <button type="submit" class="btn-task" style="background: var(--secondary-color); color: white;">Verify & Claim</button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            <?php endforeach; ?>
+        <?php else: ?>
+            <p style="color: var(--text-muted); grid-column: 1/-1; text-align: center;">No tasks available right now.</p>
+        <?php endif; ?>
     </div>
 </div>
+
+<?php require 'includes/footer.php'; ?>
